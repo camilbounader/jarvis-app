@@ -46,7 +46,7 @@ export async function POST(request) {
     parts: toParts(m.content),
   }));
 
-  try {
+  async function callGemini(){
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`,
       {
@@ -58,6 +58,16 @@ export async function POST(request) {
         }),
       }
     );
+    return res;
+  }
+
+  try {
+    let res = await callGemini();
+    // Réessaie automatiquement en cas de surcharge (429), avec un petit délai croissant
+    for (let attempt = 0; res.status === 429 && attempt < 2; attempt++) {
+      await new Promise(r => setTimeout(r, 1200 * (attempt + 1)));
+      res = await callGemini();
+    }
 
     const data = await res.json();
 

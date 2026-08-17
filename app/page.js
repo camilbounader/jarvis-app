@@ -1739,7 +1739,8 @@ function renderDocuments(){
    ========================================================================= */
 
 let jarvisBusy = false;
-let pendingImage = null;
+let pendingImages = [];
+let lastFailedMessage = null;
 let jarvisTab = 'chat'; // 'chat' | 'audit'
 let auditBusy = false;
 let pendingAuditPhoto = {}; // { [questionId]: dataUrl }
@@ -1798,6 +1799,7 @@ function renderJarvisChat(){
     </div>
     <div class="flex gap-2">
       <button data-action="jarvis-tab" data-tab="chat" class="${jarvisTab==='chat'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Discussion</button>
+      ${jarvisTab==='chat' ? `<button data-action="clear-chat" class="btn-ghost text-xs px-3 py-1.5 rounded-full text-[var(--red)]">🗑 Vider</button>` : ''}
       <button data-action="jarvis-tab" data-tab="projects" class="${jarvisTab==='projects'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Projets</button>
       <button data-action="jarvis-tab" data-tab="audit" class="${jarvisTab==='audit'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Audit initial</button>
     </div>
@@ -1813,7 +1815,8 @@ function renderChatTab(){
       ${state.chat.map(m=>`
         <div class="flex ${m.role==='user'?'justify-end':'justify-start'}">
           <div class="max-w-[80%] rounded-lg px-3 py-2 text-sm ${m.role==='user' ? 'bg-[var(--cyan-dim)] text-[var(--text-hi)]' : 'bg-[var(--bg-0)] border border-[var(--panel-border)]'}">
-            ${m.image ? `<img src="${photoSrc(m.image)}" class="rounded mb-2 max-h-40"/>` : ''}
+            ${(m.images||[]).map(img=>`<img src="${photoSrc(img)}" class="rounded mb-2 max-h-40"/>`).join('')}
+            ${m.isError ? `<button data-action="retry-jarvis" class="text-xs text-[var(--cyan)] hover:underline mt-1">↻ Réessayer</button>` : ''}
             <div style="white-space:pre-wrap">${m.text}</div>
           </div>
         </div>
@@ -1821,11 +1824,13 @@ function renderChatTab(){
       ${jarvisBusy ? `<div class="text-xs text-[var(--text-low)] font-mono">JARVIS analyse…</div>` : ''}
     </div>
 
-    ${pendingImage ? `<div class="mb-2 flex items-center gap-2"><img src="${pendingImage}" class="h-14 rounded border border-[var(--panel-border)]"/><button data-action="clear-image" class="text-xs text-[var(--red)]">retirer</button></div>` : ''}
+    ${pendingImages.length ? `<div class="mb-2 flex items-center gap-2 flex-wrap">
+      ${pendingImages.map((img,i)=>`<div class="relative"><img src="${img}" class="h-14 rounded border border-[var(--panel-border)]"/><button data-action="clear-image" data-index="${i}" class="absolute -top-1 -right-1 bg-black/70 text-[var(--red)] rounded-full w-4 h-4 text-[10px] leading-none">✕</button></div>`).join('')}
+    </div>` : ''}
 
     <div class="flex gap-2">
       <label class="btn-ghost rounded-md px-3 flex items-center cursor-pointer text-lg">
-        📷<input type="file" accept="image/*" class="hidden" data-action="jarvis-image">
+        📷<input type="file" accept="image/*" multiple class="hidden" data-action="jarvis-image">
       </label>
       <input id="jarvis-input" type="text" placeholder="Ex: Les plants de tomates sont morts, on en a plus..."
         class="flex-1 rounded-md px-3 py-2 text-sm" data-action="jarvis-input-field">
@@ -2089,21 +2094,22 @@ Règles importantes:
 - N'invente jamais de plantId, taskId, recurringTaskId ou zoneId qui n'existe pas dans l'état fourni — utilise zoneId: null si tu ne sais pas situer.`;
 }
 
-async function sendToJarvis(userText, imageBase64){
+async function sendToJarvis(userText, images){
+  images = images || [];
   jarvisBusy = true;
-  const imageKey = imageBase64 ? await storePhoto(imageBase64) : null;
-  state.chat.push({ role:'user', text:userText || '(photo envoyée)', image:imageKey });
+  const imageKeys = [];
+  for (const img of images){ imageKeys.push(await storePhoto(img)); }
+  state.chat.push({ role:'user', text:userText || `(${images.length} photo(s) envoyée(s))`, images: imageKeys });
   render();
   scrollChatToBottom();
 
   const content = [];
-  if (imageBase64){
+  images.forEach(imageBase64=>{
     const mediaType = imageBase64.substring(5, imageBase64.indexOf(';'));
     const data = imageBase64.split(',')[1];
     content.push({ type:'image', source:{ type:'base64', media_type: mediaType, data } });
-  }
-  content.push({ type:'text', text: userText || "Voici une photo, peux-tu me dire ce qu'il se passe ?" });
-
+  });
+  content.push({ type:'text', text: userText || "Voici des photos, peux-tu me dire ce qu'il se passe ?" });
   try{
     const res = await fetch('/api/jarvis-chat', {
       method:'POST',
@@ -2125,12 +2131,14 @@ async function sendToJarvis(userText, imageBase64){
     applyJarvisActions(parsed.actions || []);
     checkStatusBarTriggers(state);
     state.chat.push({ role:'assistant', text: parsed.reply || '...' });
+    lastFailedMessage = null;
   }catch(err){
-    state.chat.push({ role:'assistant', text: "Erreur de connexion à l'assistant. Réessaie dans un instant." });
+    state.chat.push({ role:'assistant', text: "Erreur de connexion à l'assistant.", isError:true });
+    lastFailedMessage = { text: userText, images };
   }
 
   jarvisBusy = false;
-  pendingImage = null;
+  pendingImages = [];
   saveState();
   render();
   scrollChatToBottom();
@@ -2921,19 +2929,28 @@ click('[data-action="add-event"]', ()=> openPrompt({
   // Jarvis chat
   const imgInput = document.querySelector('[data-action="jarvis-image"]');
   if (imgInput) imgInput.addEventListener('change', async (e)=>{
-    const file = e.target.files[0]; if(!file) return;
-    pendingImage = await resizeImage(file, 800);
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    for (const file of files){
+      const resized = await resizeImage(file, 800);
+      pendingImages.push(resized);
+    }
     render();
   });
-  click('[data-action="clear-image"]', ()=> { pendingImage = null; render(); });
+  click('[data-action="clear-image"]', (e)=> { pendingImages.splice(parseInt(e.currentTarget.dataset.index), 1); render(); });
+  click('[data-action="retry-jarvis"]', ()=> { if (lastFailedMessage) sendToJarvis(lastFailedMessage.text, lastFailedMessage.images); });
+  click('[data-action="clear-chat"]', async ()=>{
+    for (const m of state.chat){ for (const key of (m.images||[])){ await deletePhoto(key); } }
+    mutate(s=>{ s.chat = [{ role:'assistant', text:"Bonjour. JARVIS en ligne. Je surveille la maison de Mérignac — jardins, tâches, entretien. Dites-moi ce qu'il se passe, ou envoyez-moi une photo." }]; });
+  });
   const sendBtn = document.querySelector('[data-action="jarvis-send"]');
   const input = document.getElementById('jarvis-input');
   const doSend = ()=>{
     const text = input.value.trim();
-    if (!text && !pendingImage) return;
+    if (!text && !pendingImages.length) return;
     input.value = '';
-    const img = pendingImage;
-    sendToJarvis(text, img);
+    const imgs = [...pendingImages];
+    sendToJarvis(text, imgs);
   };
   if (sendBtn) sendBtn.addEventListener('click', doSend);
   if (input) input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSend(); });

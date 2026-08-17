@@ -591,6 +591,8 @@ let currentUserId = PEOPLE[0].id;
 
 let currentModule = 'dashboard';
 let calendarFilter = 'Tous';
+let calendarViewMode = 'semaine'; // 'semaine' | 'mois' | 'liste'
+let calendarWeekOffset = 0;
 
 function render(){
   const app = document.getElementById('app');
@@ -1450,19 +1452,83 @@ async function pushTaskToGoogleCalendar(task){
   return null;
 }
 
+function startOfWeek(date){
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day===0 ? -6 : 1-day;
+  d.setDate(d.getDate()+diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+function addDays(date, n){ const d = new Date(date); d.setDate(d.getDate()+n); return d; }
+function isoDate(d){ return d.toISOString().slice(0,10); }
+function minutesSinceMidnight(d){ return d.getHours()*60 + d.getMinutes(); }
+
+const CAL_HOUR_START = 7, CAL_HOUR_END = 22, CAL_PX_PER_HOUR = 48;
+
+function layoutDayEvents(events){
+  const sorted = [...events].sort((a,b)=>a.startMin-b.startMin);
+  const columns = [];
+  sorted.forEach(ev=>{
+    let placed = false;
+    for (const col of columns){
+      if (col[col.length-1].endMin <= ev.startMin){ col.push(ev); placed = true; break; }
+    }
+    if (!placed) columns.push([ev]);
+  });
+  const totalCols = columns.length || 1;
+  const out = [];
+  columns.forEach((col, colIdx)=> col.forEach(ev=> out.push({ ...ev, col: colIdx, totalCols })));
+  return out;
+}
+
+function allDayItemsFor(dateStr){
+  const items = [];
+  state.tasks.filter(t=>t.dueDate===dateStr).forEach(t=>{
+    items.push({ id:'t-'+t.id, title:t.title, kind:'tâche', color:'var(--cyan)' });
+  });
+  state.events.filter(e=>e.start===dateStr).forEach(e=>{
+    items.push({ id:'e-'+e.id, title:e.title, kind:e.category, color:'var(--amber)' });
+  });
+  if (dateStr === isoDate(new Date())){
+    state.recurringTasks.forEach(rt=>{
+      const st = recurringStatus(rt);
+      if (st.severity!=='ok') items.push({ id:'r-'+rt.id, title:rt.title+' (récurrent)', kind:'récurrent', color:'var(--amber)' });
+    });
+  }
+  googleEvents.filter(ev=> ev.start?.date === dateStr).forEach(ev=>{
+    items.push({ id:'g-'+ev.id, title: ev.summary||'(Google)', kind:'Google', color:'var(--text-low)' });
+  });
+  return items;
+}
+
+function timedItemsFor(dateStr){
+  return googleEvents
+    .filter(ev=> ev.start?.dateTime && ev.start.dateTime.slice(0,10)===dateStr)
+    .map(ev=>{
+      const start = new Date(ev.start.dateTime);
+      const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : new Date(start.getTime()+3600000);
+      return { id: ev.id, title: ev.summary||'(sans titre)', startMin: minutesSinceMidnight(start), endMin: Math.max(minutesSinceMidnight(end), minutesSinceMidnight(start)+20) };
+    });
+}
+
 function renderCalendar(){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const weekStart = addDays(startOfWeek(today), calendarWeekOffset*7);
+  const weekDays = [0,1,2,3,4,5,6].map(i=> addDays(weekStart, i));
+
   const categories = ['Tous','Jardin','Ménage','Cuisine','Déchetterie','Bricolage'];
-  const items = [...state.events]
+  const listItems = [...state.events]
     .filter(e=> calendarFilter==='Tous' || e.category===calendarFilter)
     .sort((a,b)=> new Date(a.start)-new Date(b.start));
 
   return `
-  <div class="flex items-center justify-between mb-6">
+  <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
     <div>
       <div class="text-[11px] font-mono text-[var(--text-low)] tracking-widest">PLANNING</div>
       <h1 class="font-hud text-2xl md:text-3xl font-700">Calendrier</h1>
     </div>
-    <div class="flex gap-2">
+    <div class="flex gap-2 flex-wrap">
       <button data-action="add-event" class="btn-primary text-sm px-3 py-2 rounded-md">+ Événement</button>
       <button data-action="add-unavailability" class="btn-ghost text-sm px-3 py-2 rounded-md">+ Indisponibilité</button>
     </div>
@@ -1472,35 +1538,52 @@ function renderCalendar(){
     <div class="text-xs">
       ${getGoogleTokens() ? `<span class="text-[var(--green)]">● Google Calendar connecté</span>` : `<span class="text-[var(--text-low)]">Google Calendar non connecté</span>`}
       ${googleSyncStatus==='loading' ? ' — synchronisation...' : ''}
-      ${googleSyncStatus==='error' ? ' — erreur de synchronisation' : ''}
     </div>
     <div class="flex gap-2">
-      ${getGoogleTokens() ? `
-        <button data-action="sync-google" class="btn-ghost text-xs px-3 py-1.5 rounded">Synchroniser</button>
-        <button data-action="disconnect-google" class="btn-ghost text-xs px-3 py-1.5 rounded text-[var(--red)]">Déconnecter</button>
-      ` : `<a href="/api/auth/google/login" class="btn-primary text-xs px-3 py-1.5 rounded inline-block">Connecter Google Calendar</a>`}
+      ${getGoogleTokens() ? `<button data-action="sync-google" class="btn-ghost text-xs px-3 py-1.5 rounded">Synchroniser</button>` : `<a href="/api/auth/google/login" class="btn-primary text-xs px-3 py-1.5 rounded inline-block">Connecter Google Calendar</a>`}
     </div>
   </div>
 
-  ${googleEvents.length ? `
-  <div class="text-xs font-mono text-[var(--text-low)] tracking-widest mb-2">ÉVÉNEMENTS GOOGLE CALENDAR (14 prochains jours)</div>
-  <div class="space-y-1 mb-4">
-    ${googleEvents.map(ev=>`
-      <div class="panel rounded-lg p-2 flex items-center gap-3">
-        <div class="w-14 text-center shrink-0 text-[10px] text-[var(--text-low)] font-mono">${ev.start?.dateTime ? fmtDateShort(ev.start.dateTime.slice(0,10)) : (ev.start?.date ? fmtDateShort(ev.start.date) : '')}</div>
-        <div class="flex-1 text-sm">${ev.summary || '(sans titre)'}</div>
-      </div>
-    `).join('')}
-  </div>` : ''}
+  <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+    <div class="flex gap-2">
+      <button data-action="cal-view" data-mode="semaine" class="${calendarViewMode==='semaine'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Semaine</button>
+      <button data-action="cal-view" data-mode="mois" class="${calendarViewMode==='mois'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Mois</button>
+      <button data-action="cal-view" data-mode="liste" class="${calendarViewMode==='liste'?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">Liste</button>
+    </div>
+    ${calendarViewMode==='semaine' ? `
+    <div class="flex items-center gap-2">
+      <button data-action="cal-week-nav" data-dir="-1" class="btn-ghost text-xs px-2 py-1 rounded">←</button>
+      <button data-action="cal-week-nav" data-dir="0" class="btn-ghost text-xs px-3 py-1 rounded">Aujourd'hui</button>
+      <button data-action="cal-week-nav" data-dir="1" class="btn-ghost text-xs px-2 py-1 rounded">→</button>
+    </div>` : ''}
+  </div>
 
+  ${calendarViewMode==='semaine' ? renderWeekGrid(weekDays) : ''}
+  ${calendarViewMode==='mois' ? renderMonthGrid(weekStart) : ''}
+  ${calendarViewMode==='liste' ? renderCalendarList(listItems, categories) : ''}
+
+  <div class="text-xs font-mono text-[var(--text-low)] tracking-widest mb-2 mt-6">INDISPONIBILITÉS</div>
+  <div class="space-y-2">
+    ${state.unavailabilities.map(u=>`
+      <div class="panel rounded-lg p-3 flex items-center gap-3">
+        <div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:${personById(u.person).color}22; color:${personById(u.person).color}">${personById(u.person).name[0]}</div>
+        <div class="flex-1 text-sm">${u.label} <span class="text-[var(--text-low)] font-mono text-xs">(${fmtDateShort(u.start)} → ${fmtDateShort(u.end)})</span></div>
+        <button data-action="delete-unavail" data-id="${u.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
+      </div>
+    `).join('') || '<div class="text-sm text-[var(--text-low)]">Aucune indisponibilité déclarée.</div>'}
+  </div>
+  `;
+}
+
+function renderCalendarList(listItems, categories){
+  return `
   <div class="flex gap-2 mb-4 flex-wrap">
     ${categories.map(c=>`
       <button data-action="filter-cal" data-cat="${c}" class="${calendarFilter===c?'btn-primary':'btn-ghost'} text-xs px-3 py-1.5 rounded-full">${c}</button>
     `).join('')}
   </div>
-
   <div class="space-y-2 mb-6">
-    ${items.map(e=>`
+    ${listItems.map(e=>`
       <div class="panel rounded-lg p-3 flex items-center gap-3">
         <div class="w-14 text-center shrink-0">
           <div class="text-[10px] text-[var(--text-low)] font-mono">${fmtDateShort(e.start)}</div>
@@ -1514,16 +1597,91 @@ function renderCalendar(){
       </div>
     `).join('') || '<div class="text-sm text-[var(--text-low)]">Aucun événement dans cette catégorie.</div>'}
   </div>
+  `;
+}
 
-  <div class="text-xs font-mono text-[var(--text-low)] tracking-widest mb-2">INDISPONIBILITÉS</div>
-  <div class="space-y-2">
-    ${state.unavailabilities.map(u=>`
-      <div class="panel rounded-lg p-3 flex items-center gap-3">
-        <div class="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold" style="background:${personById(u.person).color}22; color:${personById(u.person).color}">${personById(u.person).name[0]}</div>
-        <div class="flex-1 text-sm">${u.label} <span class="text-[var(--text-low)] font-mono text-xs">(${fmtDateShort(u.start)} → ${fmtDateShort(u.end)})</span></div>
-        <button data-action="delete-unavail" data-id="${u.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
+function renderMonthGrid(weekStart){
+  const refDate = weekStart;
+  const monthStart = new Date(refDate.getFullYear(), refDate.getMonth(), 1);
+  const gridStart = startOfWeek(monthStart);
+  const days = Array.from({length:42}, (_,i)=> addDays(gridStart, i));
+  const monthLabel = refDate.toLocaleDateString('fr-FR', { month:'long', year:'numeric' });
+
+  return `
+  <div class="text-sm font-semibold mb-2 capitalize">${monthLabel}</div>
+  <div class="grid grid-cols-7 gap-1 mb-6">
+    ${['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'].map(d=>`<div class="text-[10px] text-[var(--text-low)] font-mono text-center pb-1">${d}</div>`).join('')}
+    ${days.map(d=>{
+      const dStr = isoDate(d);
+      const inMonth = d.getMonth()===refDate.getMonth();
+      const jarvisCount = allDayItemsFor(dStr).filter(i=>i.kind!=='Google').length;
+      const googleCount = allDayItemsFor(dStr).filter(i=>i.kind==='Google').length + timedItemsFor(dStr).length;
+      const isToday = dStr === isoDate(new Date());
+      return `
+      <button data-action="cal-pick-day" data-date="${dStr}" class="panel rounded p-1.5 text-left h-16 ${inMonth?'':'opacity-30'} ${isToday?'border-[var(--cyan)]':''}">
+        <div class="text-[10px] font-mono">${d.getDate()}</div>
+        <div class="flex gap-0.5 mt-1 flex-wrap">
+          ${jarvisCount ? `<span class="w-1.5 h-1.5 rounded-full" style="background:var(--cyan)"></span>` : ''}
+          ${googleCount ? `<span class="w-1.5 h-1.5 rounded-full" style="background:var(--text-low)"></span>` : ''}
+        </div>
+      </button>`;
+    }).join('')}
+  </div>
+  `;
+}
+
+function renderWeekGrid(weekDays){
+  const totalHeight = (CAL_HOUR_END - CAL_HOUR_START) * CAL_PX_PER_HOUR;
+  const hours = [];
+  for (let h=CAL_HOUR_START; h<=CAL_HOUR_END; h++) hours.push(h);
+
+  return `
+  <div class="mb-6 overflow-x-auto">
+    <div style="min-width:700px">
+      <div class="grid" style="grid-template-columns: 50px repeat(7, 1fr);">
+        <div></div>
+        ${weekDays.map(d=>{
+          const dStr = isoDate(d);
+          const isToday = dStr === isoDate(new Date());
+          return `<div class="text-center pb-2">
+            <div class="text-[10px] text-[var(--text-low)] font-mono">${d.toLocaleDateString('fr-FR',{weekday:'short'})}</div>
+            <div class="text-sm font-semibold ${isToday?'text-[var(--cyan)]':''}">${d.getDate()}</div>
+          </div>`;
+        }).join('')}
       </div>
-    `).join('') || '<div class="text-sm text-[var(--text-low)]">Aucune indisponibilité déclarée.</div>'}
+
+      <div class="grid" style="grid-template-columns: 50px repeat(7, 1fr);">
+        <div></div>
+        ${weekDays.map(d=>{
+          const dStr = isoDate(d);
+          const items = allDayItemsFor(dStr);
+          return `<div class="px-1 pb-2 space-y-1 min-h-[24px]">
+            ${items.map(it=>`<div class="text-[9px] rounded px-1 py-0.5 truncate" style="background:${it.color}22; color:${it.color}" title="${it.title}">${it.title}</div>`).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+
+      <div class="grid" style="grid-template-columns: 50px repeat(7, 1fr);">
+        <div class="relative" style="height:${totalHeight}px">
+          ${hours.map(h=>`<div class="absolute text-[9px] text-[var(--text-low)] font-mono" style="top:${(h-CAL_HOUR_START)*CAL_PX_PER_HOUR-6}px; right:4px">${h}h</div>`).join('')}
+        </div>
+        ${weekDays.map(d=>{
+          const dStr = isoDate(d);
+          const positioned = layoutDayEvents(timedItemsFor(dStr));
+          return `
+          <div class="relative border-l border-[var(--panel-border)]" style="height:${totalHeight}px">
+            ${hours.map(h=>`<div class="absolute w-full border-t border-[var(--panel-border)]" style="top:${(h-CAL_HOUR_START)*CAL_PX_PER_HOUR}px"></div>`).join('')}
+            ${positioned.map(ev=>{
+              const top = Math.max(0, (ev.startMin - CAL_HOUR_START*60)/60*CAL_PX_PER_HOUR);
+              const height = Math.max(16, (ev.endMin-ev.startMin)/60*CAL_PX_PER_HOUR);
+              const widthPct = 100/ev.totalCols;
+              const leftPct = ev.col*widthPct;
+              return `<div class="absolute rounded px-1 py-0.5 text-[9px] overflow-hidden panel" style="top:${top}px; height:${height}px; left:${leftPct}%; width:${widthPct-2}%; background:rgba(61,214,208,0.15); border-color:var(--cyan);" title="${ev.title}">${ev.title}</div>`;
+            }).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
   </div>
   `;
 }
@@ -2667,6 +2825,20 @@ function attachHandlers(){
   }));
 
   // Calendar
+  click('[data-action="cal-view"]', (e)=>{ calendarViewMode = e.currentTarget.dataset.mode; render(); });
+click('[data-action="cal-week-nav"]', (e)=>{
+  const dir = parseInt(e.currentTarget.dataset.dir);
+  calendarWeekOffset = dir===0 ? 0 : calendarWeekOffset+dir;
+  render();
+});
+click('[data-action="cal-pick-day"]', (e)=>{
+  const picked = new Date(e.currentTarget.dataset.date);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const diffWeeks = Math.round((startOfWeek(picked) - startOfWeek(today)) / (7*86400000));
+  calendarWeekOffset = diffWeeks;
+  calendarViewMode = 'semaine';
+  render();
+});
   click('[data-action="filter-cal"]', (e)=> { calendarFilter = e.currentTarget.dataset.cat; render(); });
   click('[data-action="sync-google"]', ()=> syncGoogleCalendar());
 click('[data-action="disconnect-google"]', ()=> disconnectGoogle());

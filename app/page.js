@@ -258,6 +258,7 @@ function seedState(){
     ],
     // Préférences de notifications push — UI prête, l'envoi réel nécessite le déploiement (voir guide)
     pushSettings: {
+      googleCalendarSync: true,
       tachesAssignees: true,
       tachesRecurrentesDues: true,
       alertesMeteo: true,
@@ -579,6 +580,7 @@ const MODULES = [
   { id:'calendar',  label:'Calendrier',          icon:'▦' },
   { id:'documents', label:'Coffre-fort',         icon:'▣' },
   { id:'jarvis',    label:'JARVIS (IA)',         icon:'◉' },
+  { id:'settings',  label:'Paramètres',          icon:'⚙' },
 ];
 
 // Qui utilise l'app sur cet appareil — sert à attribuer correctement les
@@ -644,6 +646,7 @@ function renderModule(){
     case 'calendar': return renderCalendar();
     case 'documents': return renderDocuments();
     case 'jarvis': return renderJarvisChat();
+    case 'settings': return renderSettings();
     default: return '';
   }
 }
@@ -1376,6 +1379,77 @@ function renderTasks(){
    CALENDRIER
    ========================================================================= */
 
+// --- Google Calendar : jetons stockés sur l'appareil de la personne connectée ---
+function getGoogleTokens(){
+  try{ const raw = localStorage.getItem('jarvis:google-tokens'); return raw ? JSON.parse(raw) : null; }catch(e){ return null; }
+}
+async function getValidGoogleAccessToken(){
+  const tokens = getGoogleTokens();
+  if (!tokens) return null;
+  if (tokens.access_token && tokens.expires_at > Date.now() + 60000) return tokens.access_token;
+  if (!tokens.refresh_token) return null;
+  try{
+    const res = await fetch('/api/auth/google/refresh', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ refresh_token: tokens.refresh_token })
+    });
+    const data = await res.json();
+    if (!res.ok) return null;
+    const updated = { ...tokens, access_token: data.access_token, expires_at: data.expires_at };
+    localStorage.setItem('jarvis:google-tokens', JSON.stringify(updated));
+    return data.access_token;
+  }catch(e){ return null; }
+}
+function disconnectGoogle(){ localStorage.removeItem('jarvis:google-tokens'); googleEvents = []; render(); }
+
+let googleEvents = [];
+let googleSyncStatus = 'idle';
+
+async function syncGoogleCalendar(){
+  const token = await getValidGoogleAccessToken();
+  if (!token){ googleEvents = []; render(); return; }
+  googleSyncStatus = 'loading'; render();
+  try{
+    const timeMin = new Date().toISOString();
+    const timeMax = new Date(Date.now()+14*86400000).toISOString();
+    const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await res.json();
+    if (!res.ok){ googleSyncStatus = 'error'; render(); return; }
+    googleEvents = data.items || [];
+    googleSyncStatus = 'idle';
+    if (!state.pushSettings.googleCalendarSync){ render(); return; }
+    mutate(s=>{
+      const existingIds = new Set(s.unavailabilities.filter(u=>u.googleEventId).map(u=>u.googleEventId));
+      googleEvents.forEach(ev=>{
+        if (ev.transparency === 'transparent') return;
+        if (!ev.start?.dateTime) return;
+        if (existingIds.has(ev.id)) return;
+        const day = ev.start.dateTime.slice(0,10);
+        s.unavailabilities.push({ id: uid(), person: currentUserId, label: ev.summary || 'Google Calendar', start: day, end: day, googleEventId: ev.id, fromGoogle: true });
+      });
+      const currentIds = new Set(googleEvents.map(e=>e.id));
+      s.unavailabilities = s.unavailabilities.filter(u=> !u.fromGoogle || currentIds.has(u.googleEventId));
+    });
+  }catch(e){ googleSyncStatus = 'error'; render(); }
+}
+
+async function pushTaskToGoogleCalendar(task){
+  const token = await getValidGoogleAccessToken();
+  if (!token) return null;
+  try{
+    const res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+      method:'POST',
+      headers: { Authorization:`Bearer ${token}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ summary: `JARVIS — ${task.title}`, start: { date: task.dueDate }, end: { date: task.dueDate } })
+    });
+    const data = await res.json();
+    if (res.ok) return data.id;
+  }catch(e){}
+  return null;
+}
+
 function renderCalendar(){
   const categories = ['Tous','Jardin','Ménage','Cuisine','Déchetterie','Bricolage'];
   const items = [...state.events]
@@ -1394,9 +1468,30 @@ function renderCalendar(){
     </div>
   </div>
 
-  <div class="text-[10px] text-[var(--text-low)] font-mono mb-3">
-    Google Calendar : synchronisation à activer côté production (OAuth requis — non disponible dans ce prototype).
+  <div class="panel rounded-lg p-3 mb-4 flex items-center justify-between flex-wrap gap-2">
+    <div class="text-xs">
+      ${getGoogleTokens() ? `<span class="text-[var(--green)]">● Google Calendar connecté</span>` : `<span class="text-[var(--text-low)]">Google Calendar non connecté</span>`}
+      ${googleSyncStatus==='loading' ? ' — synchronisation...' : ''}
+      ${googleSyncStatus==='error' ? ' — erreur de synchronisation' : ''}
+    </div>
+    <div class="flex gap-2">
+      ${getGoogleTokens() ? `
+        <button data-action="sync-google" class="btn-ghost text-xs px-3 py-1.5 rounded">Synchroniser</button>
+        <button data-action="disconnect-google" class="btn-ghost text-xs px-3 py-1.5 rounded text-[var(--red)]">Déconnecter</button>
+      ` : `<a href="/api/auth/google/login" class="btn-primary text-xs px-3 py-1.5 rounded inline-block">Connecter Google Calendar</a>`}
+    </div>
   </div>
+
+  ${googleEvents.length ? `
+  <div class="text-xs font-mono text-[var(--text-low)] tracking-widest mb-2">ÉVÉNEMENTS GOOGLE CALENDAR (14 prochains jours)</div>
+  <div class="space-y-1 mb-4">
+    ${googleEvents.map(ev=>`
+      <div class="panel rounded-lg p-2 flex items-center gap-3">
+        <div class="w-14 text-center shrink-0 text-[10px] text-[var(--text-low)] font-mono">${ev.start?.dateTime ? fmtDateShort(ev.start.dateTime.slice(0,10)) : (ev.start?.date ? fmtDateShort(ev.start.date) : '')}</div>
+        <div class="flex-1 text-sm">${ev.summary || '(sans titre)'}</div>
+      </div>
+    `).join('')}
+  </div>` : ''}
 
   <div class="flex gap-2 mb-4 flex-wrap">
     ${categories.map(c=>`
@@ -1490,6 +1585,51 @@ let pendingImage = null;
 let jarvisTab = 'chat'; // 'chat' | 'audit'
 let auditBusy = false;
 let pendingAuditPhoto = {}; // { [questionId]: dataUrl }
+
+function renderSettings(){
+  const labels = {
+    googleCalendarSync: "Importer automatiquement les indisponibilités depuis Google Calendar",
+    tachesAssignees: "Notification quand une tâche m'est assignée",
+    tachesRecurrentesDues: "Notification quand une tâche récurrente est due",
+    alertesMeteo: "Notification pour les alertes météo (canicule, orage...)",
+    alertesUrgentes: "Notification pour les alertes urgentes de la maison",
+    sondagesDisponibilite: "Notification pour les sondages de disponibilité",
+    observationsJarvis: "Notification pour les observations de JARVIS",
+  };
+  const tokens = getGoogleTokens();
+
+  return `
+  <div class="mb-6">
+    <div class="text-[11px] font-mono text-[var(--text-low)] tracking-widest">RÉGLAGES</div>
+    <h1 class="font-hud text-2xl md:text-3xl font-700">Paramètres</h1>
+  </div>
+
+  <div class="panel rounded-lg p-4 mb-4">
+    <div class="badge text-[var(--text-low)] mb-3">GOOGLE CALENDAR</div>
+    <div class="text-sm mb-2">${tokens ? '● Connecté sur cet appareil' : 'Non connecté'}</div>
+    <div class="flex gap-2">
+      ${tokens
+        ? `<button data-action="disconnect-google" class="btn-ghost text-xs px-3 py-1.5 rounded text-[var(--red)]">Déconnecter</button>`
+        : `<a href="/api/auth/google/login" class="btn-primary text-xs px-3 py-1.5 rounded inline-block">Connecter</a>`}
+    </div>
+  </div>
+
+  <div class="panel rounded-lg p-4">
+    <div class="badge text-[var(--text-low)] mb-3">NOTIFICATIONS & SYNCHRONISATION</div>
+    <div class="space-y-3">
+      ${Object.keys(labels).map(key=>`
+        <label class="flex items-center justify-between gap-3 text-sm cursor-pointer">
+          <span class="flex-1">${labels[key]}</span>
+          <input type="checkbox" data-action="toggle-setting" data-key="${key}" ${state.pushSettings[key] ? 'checked' : ''} class="accent-[var(--cyan)] w-4 h-4">
+        </label>
+      `).join('')}
+    </div>
+    <div class="text-[10px] text-[var(--text-low)] font-mono mt-3">
+      Les vraies notifications push (alertes sur le téléphone même app fermée) nécessitent une étape technique supplémentaire — ces réglages préparent déjà ce qui sera envoyé une fois branché.
+    </div>
+  </div>
+  `;
+}
 
 function renderJarvisChat(){
   return `
@@ -2528,7 +2668,13 @@ function attachHandlers(){
 
   // Calendar
   click('[data-action="filter-cal"]', (e)=> { calendarFilter = e.currentTarget.dataset.cat; render(); });
-  click('[data-action="add-event"]', ()=> openPrompt({
+  click('[data-action="sync-google"]', ()=> syncGoogleCalendar());
+click('[data-action="disconnect-google"]', ()=> disconnectGoogle());
+click('[data-action="toggle-setting"]', (e)=> mutate(s=>{
+  const key = e.currentTarget.dataset.key;
+  s.pushSettings[key] = !s.pushSettings[key];
+}));  
+click('[data-action="add-event"]', ()=> openPrompt({
     title:'Nouvel événement',
     fields:[
       {label:'Titre', value:''},
@@ -2721,6 +2867,7 @@ function attachHandlers(){
 
 loadState();
 fetchWeather();
+syncGoogleCalendar();
 
   }, []);
 

@@ -3041,6 +3041,10 @@ loadState();
 fetchWeather();
 syncGoogleCalendar();
 
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+}
+
   }, []);
 
   return <div id="app" className="flex min-h-screen"></div>;

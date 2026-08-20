@@ -330,29 +330,27 @@ function hydrateState(loaded){
 // -----------------------------------------------------------------------
 let photoCache = {};
 
-async function preloadPhotoCache(){
-  try{
-    const list = await storageList('photo:');
-    const keys = (list && list.keys) || [];
-    await Promise.all(keys.map(async k=>{
-      try{ const r = await storageGet(k); if (r) photoCache[k] = r.value; }catch(e){}
-    }));
-  }catch(e){ /* pas de photos encore, ou storage indisponible */ }
-  render();
-}
-
 async function storePhoto(dataUrl){
-  const key = 'photo:' + uid();
-  photoCache[key] = dataUrl;
-  try{ await storageSet(key, dataUrl); }catch(e){ console.error('Erreur stockage photo', e); }
-  return key;
+  try{
+    const res = await fetch('/api/upload-photo', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ dataUrl })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.url){ console.error('Erreur upload photo', data); return null; }
+    return data.url;
+  }catch(e){ console.error('Erreur upload photo', e); return null; }
 }
-async function deletePhoto(key){
-  if (!key) return;
-  delete photoCache[key];
-  try{ await storageDelete(key); }catch(e){}
+async function deletePhoto(url){
+  if (!url) return;
+  try{
+    await fetch('/api/delete-photo', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ url })
+    });
+  }catch(e){}
 }
-function photoSrc(key){ return key ? (photoCache[key] || null) : null; }
+function photoSrc(url){ return url || null; }
 
 async function loadState(){
   try{
@@ -361,8 +359,7 @@ async function loadState(){
   }catch(e){
     state = seedState();
   }
-  render();
-  preloadPhotoCache();
+   render();
 }
 
 function saveState(){
@@ -888,12 +885,10 @@ function renderItemCard(p){
           <button data-action="delete-plant" data-id="${p.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
         </div>
 
-        ${photoSrc(p.photo) ? `
+                ${photoSrc(p.photo) ? `
           <div class="relative mb-3">
             <img src="${photoSrc(p.photo)}" class="w-full h-28 object-cover rounded-md border border-[var(--panel-border)]"/>
-            <label class="absolute bottom-1 right-1 text-[9px] bg-black/60 text-[var(--cyan)] px-1.5 py-0.5 rounded cursor-pointer">
-              Changer<input type="file" accept="image/*" class="hidden" data-action="plant-photo" data-id="${p.id}">
-            </label>
+            <button data-action="remove-plant-photo" data-id="${p.id}" class="absolute top-1 right-1 w-6 h-6 flex items-center justify-center bg-black/80 text-[var(--red)] rounded-full text-sm font-bold">✕</button>
           </div>`
           : `<label class="w-full h-28 rounded-md mb-3 border border-dashed border-[var(--panel-border)] flex items-center justify-center text-[var(--text-low)] text-xs cursor-pointer hover:border-[var(--cyan)]">
                + Ajouter une photo
@@ -1106,6 +1101,7 @@ function renderMaison(){
       ${photoSrc(folder.photo) ? `
         <div class="relative w-28 h-28 shrink-0">
           <img src="${photoSrc(folder.photo)}" class="w-full h-full object-cover rounded-md"/>
+          <button data-action="remove-zone-photo" data-id="${folder.id}" class="absolute top-1 right-1 w-5 h-5 flex items-center justify-center bg-black/80 text-[var(--red)] rounded-full text-xs font-bold">✕</button>
           <label class="absolute bottom-1 right-1 text-[9px] bg-black/60 text-[var(--cyan)] px-1.5 py-0.5 rounded cursor-pointer">
             Changer<input type="file" accept="image/*" class="hidden" data-action="zone-photo" data-id="${folder.id}">
           </label>
@@ -1772,7 +1768,16 @@ function renderSettings(){
         : `<a href="/api/auth/google/login" class="btn-primary text-xs px-3 py-1.5 rounded inline-block">Connecter</a>`}
     </div>
   </div>
-
+  <div class="panel rounded-lg p-4 mb-4">
+    <div class="badge text-[var(--text-low)] mb-3">SAUVEGARDE DES DONNÉES</div>
+    <div class="flex gap-2 flex-wrap">
+      <button data-action="export-data" class="btn-primary text-xs px-3 py-1.5 rounded">Exporter mes données</button>
+      <button data-action="import-data" class="btn-ghost text-xs px-3 py-1.5 rounded">Importer une sauvegarde</button>
+    </div>
+    <div class="text-[10px] text-[var(--text-low)] font-mono mt-2">
+      Exporter copie toutes vos données (hors photos) dans le presse-papier — collez-les dans une note pour les garder en sécurité.
+    </div>
+  </div>
   <div class="panel rounded-lg p-4">
     <div class="badge text-[var(--text-low)] mb-3">NOTIFICATIONS & SYNCHRONISATION</div>
     <div class="space-y-3">
@@ -2508,36 +2513,38 @@ function attachHandlers(){
   }));
   click('[data-action="add-item"]', (e)=> openItemModal(e.currentTarget.dataset.zone || currentFolderId));
   click('[data-action="edit-plant-traits"]', (e)=>{
-    const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
-    if (!p) return;
-    openPrompt({
-      title:`Modifier "${p.name}"`,
-      fields:[
-        {label:'Exposition', type:'select', options:[{value:'Plein soleil',label:'Plein soleil'},{value:'Mi-ombre',label:'Mi-ombre'},{value:'Ombre',label:'Ombre'}]},
-        {label:'Tolérance à la chaleur', type:'select', options:[{value:'faible',label:'Faible'},{value:'moyenne',label:'Moyenne'},{value:'haute',label:'Haute'}]},
-      ],
-      onSubmit:([exposition,toleranceChaleur])=> mutate(s=>{
+  const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
+  if (!p) return;
+  openPrompt({
+    title:`Modifier "${p.name}"`,
+    fields:[
+      {label:'Zone', type:'select', options: buildZoneTreeOptions()},
+      {label:'Exposition', type:'select', options:[{value:'Plein soleil',label:'Plein soleil'},{value:'Mi-ombre',label:'Mi-ombre'},{value:'Ombre',label:'Ombre'}]},
+            {label:'Tolérance à la chaleur', type:'select', options:[{value:'faible',label:'Faible'},{value:'moyenne',label:'Moyenne'},{value:'haute',label:'Haute'}]},
+    ],
+    onSubmit:([zoneId,exposition,toleranceChaleur])=> mutate(s=>{
         const pp = s.plants.find(pp=>pp.id===p.id);
-        if (pp){ pp.exposition = exposition; pp.toleranceChaleur = toleranceChaleur; }
+        if (pp){ pp.zoneId = zoneId; pp.exposition = exposition; pp.toleranceChaleur = toleranceChaleur; }
       })
-    });
   });
+});
   click('[data-action="edit-item-traits"]', (e)=>{
-    const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
-    if (!p) return;
-    openPrompt({
-      title:`Modifier "${p.name}"`,
-      fields:[
-        {label:'État', value:p.etat||''},
-        {label:'Quantité', type:'number', value:String(p.quantite||1)},
-        {label:'Notes', value:p.notes||''},
-      ],
-      onSubmit:([etat,quantite,notes])=> mutate(s=>{
+  const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
+  if (!p) return;
+  openPrompt({
+    title:`Modifier "${p.name}"`,
+    fields:[
+      {label:'Zone', type:'select', options: buildZoneTreeOptions()},
+      {label:'État', value:p.etat||''},
+      {label:'Quantité', type:'number', value:String(p.quantite||1)},
+      {label:'Notes', value:p.notes||''},
+    ],
+    onSubmit:([zoneId,etat,quantite,notes])=> mutate(s=>{
         const pp = s.plants.find(pp=>pp.id===p.id);
-        if (pp){ pp.etat = etat; pp.quantite = parseInt(quantite)||1; pp.notes = notes; }
+        if (pp){ pp.zoneId = zoneId; pp.etat = etat; pp.quantite = parseInt(quantite)||1; pp.notes = notes; }
       })
-    });
   });
+});
   click('[data-action="edit-custom-field"]', (e)=>{
     const p = state.plants.find(p=>p.id===e.currentTarget.dataset.item);
     const f = p && p.customFields.find(f=>f.id===e.currentTarget.dataset.field);
@@ -2579,6 +2586,14 @@ function attachHandlers(){
     if (p) p.customFields = p.customFields.filter(f=>f.id!==e.currentTarget.dataset.field);
   }));
   click('[data-action="delete-plant"]', (e)=> mutate(s=> s.plants = s.plants.filter(p=>p.id!==e.currentTarget.dataset.id)));
+  click('[data-action="remove-plant-photo"]', async (e)=>{
+  const id = e.currentTarget.dataset.id;
+  const p = state.plants.find(p=>p.id===id);
+  if (!p || !p.photo) return;
+  const oldPhoto = p.photo;
+  await deletePhoto(oldPhoto);
+  mutate(s=>{ const pp = s.plants.find(pp=>pp.id===id); if (pp) pp.photo = null; });
+});
   click('[data-action="water-plant"]', (e)=> mutate(s=>{
     const p = s.plants.find(p=>p.id===e.currentTarget.dataset.id);
     if(p){ p.dernierArrosage = todayISO(); p.health = Math.min(100, p.health+8); }
@@ -2631,6 +2646,14 @@ function attachHandlers(){
       });
     }
   }));
+  click('[data-action="remove-zone-photo"]', async (e)=>{
+  const id = e.currentTarget.dataset.id;
+  const z = state.zones.find(z=>z.id===id);
+  if (!z || !z.photo) return;
+  const oldPhoto = z.photo;
+  await deletePhoto(oldPhoto);
+  mutate(s=>{ const zz = s.zones.find(zz=>zz.id===id); if (zz) zz.photo = null; });
+});
   click('[data-action="edit-zone-meta"]', (e)=>{
     const z = state.zones.find(z=>z.id===e.currentTarget.dataset.id);
     if (!z) return;
@@ -2854,6 +2877,30 @@ click('[data-action="toggle-setting"]', (e)=> mutate(s=>{
   const key = e.currentTarget.dataset.key;
   s.pushSettings[key] = !s.pushSettings[key];
 }));  
+  click('[data-action="export-data"]', async ()=>{
+    try{
+      await navigator.clipboard.writeText(JSON.stringify(state));
+      alert("Données copiées dans le presse-papier. Collez-les maintenant dans une note (Bloc-notes, Google Keep...) pour les garder en sécurité.");
+    }catch(e){
+      alert("Impossible de copier automatiquement. Ouvre la console (F12) pour récupérer les données manuellement.");
+      console.log(JSON.stringify(state));
+    }
+  });
+  click('[data-action="import-data"]', ()=> openPrompt({
+    title:'Importer une sauvegarde',
+    fields:[{label:'Collez ici les données exportées', value:''}],
+    onSubmit:([json])=>{
+      try{
+        const imported = hydrateState(JSON.parse(json));
+        state = imported;
+        saveState();
+        render();
+        alert("Import réussi !");
+      }catch(e){
+        alert("Le texte collé n'est pas valide. Vérifie que tu as bien tout copié.");
+      }
+    }
+  }));
 click('[data-action="add-event"]', ()=> openPrompt({
     title:'Nouvel événement',
     fields:[

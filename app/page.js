@@ -384,16 +384,21 @@ function saveState(){
   saveTimer = setTimeout(()=> flushSave(), 250);
 }
 
-function flushSave(){
+async function flushSave(){
   clearTimeout(saveTimer);
   console.log('💾 Sauvegarde envoyée:', new Date().toLocaleTimeString());
   try{
-    fetch('/api/state', {
+    const res = await fetch('/api/state', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ value: JSON.stringify(state) }),
-      keepalive: true
+      body: JSON.stringify({ value: JSON.stringify(state) })
     });
-  }catch(e){ console.error('Erreur de sauvegarde', e); }
+    if (!res.ok){
+      const err = await res.text();
+      console.error('❌ Sauvegarde refusée par le serveur:', res.status, err);
+    } else {
+      console.log('✅ Sauvegarde confirmée par le serveur');
+    }
+  }catch(e){ console.error('❌ Erreur réseau lors de la sauvegarde:', e); }
 }
 
 if (typeof window !== 'undefined'){

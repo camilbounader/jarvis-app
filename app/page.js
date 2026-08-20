@@ -2877,13 +2877,19 @@ click('[data-action="toggle-setting"]', (e)=> mutate(s=>{
   const key = e.currentTarget.dataset.key;
   s.pushSettings[key] = !s.pushSettings[key];
 }));  
-  click('[data-action="export-data"]', async ()=>{
+  click('[data-action="export-data"]', ()=>{
     try{
-      await navigator.clipboard.writeText(JSON.stringify(state));
-      alert("Données copiées dans le presse-papier. Collez-les maintenant dans une note (Bloc-notes, Google Keep...) pour les garder en sécurité.");
+      const blob = new Blob([JSON.stringify(state)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jarvis-sauvegarde-${todayISO()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }catch(e){
-      alert("Impossible de copier automatiquement. Ouvre la console (F12) pour récupérer les données manuellement.");
-      console.log(JSON.stringify(state));
+      alert("Erreur lors de l'export.");
     }
   });
   click('[data-action="import-data"]', ()=> openPrompt({

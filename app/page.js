@@ -354,20 +354,48 @@ function photoSrc(url){ return url || null; }
 
 async function loadState(){
   try{
-    const res = await storageGet(STORAGE_KEY);
-    state = res && res.value ? hydrateState(JSON.parse(res.value)) : seedState();
+    const res = await fetch('/api/state');
+    const data = await res.json();
+    state = data.value ? hydrateState(JSON.parse(data.value)) : seedState();
   }catch(e){
     state = seedState();
   }
-   render();
+  render();
+  startPolling();
+}
+
+function startPolling(){
+  setInterval(async ()=>{
+    try{
+      const res = await fetch('/api/state');
+      const data = await res.json();
+      if (data.value && !document.querySelector('.modal-backdrop')){
+        state = hydrateState(JSON.parse(data.value));
+        render();
+      }
+    }catch(e){}
+  }, 20000);
 }
 
 function saveState(){
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async ()=>{
-    try{ await storageSet(STORAGE_KEY, JSON.stringify(state)); }
-    catch(e){ console.error('Erreur de sauvegarde', e); }
-  }, 250);
+  saveTimer = setTimeout(()=> flushSave(), 250);
+}
+
+function flushSave(){
+  clearTimeout(saveTimer);
+  try{
+    fetch('/api/state', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ value: JSON.stringify(state) }),
+      keepalive: true
+    });
+  }catch(e){ console.error('Erreur de sauvegarde', e); }
+}
+
+if (typeof window !== 'undefined'){
+  window.addEventListener('beforeunload', flushSave);
+  document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState==='hidden') flushSave(); });
 }
 
 // Vérifie les barres d'état personnalisées de tous les éléments : si l'une
@@ -3107,9 +3135,10 @@ click('[data-action="add-event"]', ()=> openPrompt({
   }));
 }
 
-loadState();
-fetchWeather();
-syncGoogleCalendar();
+loadState().then(()=>{
+  fetchWeather();
+  syncGoogleCalendar();
+});
 
 if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(()=>{});

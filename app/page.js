@@ -370,8 +370,9 @@ function startPolling(){
       const res = await fetch('/api/state');
       const data = await res.json();
       console.log('🔄 Poll reçu:', new Date().toLocaleTimeString());
-      if (data.value && !document.querySelector('.modal-backdrop')){
-        console.log('⚠️ Poll a écrasé les données locales');
+      const activeTag = document.activeElement ? document.activeElement.tagName : '';
+      const isTyping = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
+      if (data.value && !document.querySelector('.modal-backdrop') && !isTyping){
         state = hydrateState(JSON.parse(data.value));
         render();
       }
@@ -635,6 +636,7 @@ function render(){
         ${renderModule()}
       </div>
     </main>
+    ${openItemDetailId ? (state.plants.find(p=>p.id===openItemDetailId) ? renderItemDetail(state.plants.find(p=>p.id===openItemDetailId)) : '') : ''}
   `;
   attachHandlers();
 }
@@ -907,6 +909,63 @@ function renderPlants(){
   }).join('')}
   `;
 }
+function renderItemDetail(p){
+  const isPlant = p.category === 'Plante';
+  return `
+  <div class="fixed inset-0 modal-backdrop flex items-center justify-center z-50 p-4" data-action="close-item-detail-backdrop">
+    <div class="panel rounded-lg p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-hud text-xl font-700">${p.name}</h2>
+        <button data-action="close-item-detail" class="text-[var(--text-low)] hover:text-[var(--red)] text-lg">✕</button>
+      </div>
+
+      ${photoSrc(p.photo) ? `<img src="${photoSrc(p.photo)}" class="w-full h-48 object-cover rounded-md mb-3 border border-[var(--panel-border)]"/>`
+        : `<div class="w-full h-48 rounded-md mb-3 border border-dashed border-[var(--panel-border)] flex items-center justify-center text-[var(--text-low)] text-sm">Pas de photo de profil</div>`}
+
+      <div class="text-xs text-[var(--text-mid)] mb-3">${p.subCategory||''} · ${zoneName(p.zoneId)}</div>
+
+      ${isPlant ? `
+      <div class="grid grid-cols-3 gap-2 mb-3 text-center">
+        <div class="panel rounded p-2"><div class="text-[9px] text-[var(--text-low)] font-mono">SANTÉ</div><div class="text-sm font-bold" style="color:${healthColor(p.health)}">${p.health}</div></div>
+        <div class="panel rounded p-2"><div class="text-[9px] text-[var(--text-low)] font-mono">ARROSAGE</div><div class="text-sm font-bold" style="color:${barColor(plantWateringBar(p))}">${plantWateringBar(p)}</div></div>
+        <div class="panel rounded p-2"><div class="text-[9px] text-[var(--text-low)] font-mono">TAILLAGE</div><div class="text-sm font-bold" style="color:${barColor(plantPruningBar(p))}">${plantPruningBar(p)}</div></div>
+      </div>
+      <div class="text-xs text-[var(--text-mid)] mb-3">Exposition: ${p.exposition||'—'} · Tolérance chaleur: ${p.toleranceChaleur||'—'}</div>
+      ` : `
+      <div class="text-xs text-[var(--text-mid)] mb-3">État: ${p.etat||'—'} · Quantité: ${p.quantite||1}</div>
+      `}
+
+      ${(p.customFields||[]).length ? `
+      <div class="space-y-1 mb-3 border-t border-[var(--panel-border)] pt-2">
+        ${p.customFields.map(f=>`<div class="flex justify-between text-xs"><span class="text-[var(--text-mid)]">${f.label}</span><span>${f.value}</span></div>`).join('')}
+      </div>` : ''}
+
+      <div class="border-t border-[var(--panel-border)] pt-3 mt-3">
+        <div class="badge text-[var(--text-low)] mb-2">ANALYSE JARVIS</div>
+        ${analyzePhotoPending ? `
+          <img src="${analyzePhotoPending}" class="w-full h-40 object-cover rounded-md mb-2 border border-[var(--panel-border)]"/>
+          ${analyzeBusy ? `<div class="text-xs text-[var(--text-low)] font-mono">JARVIS analyse la photo...</div>` : `
+          <div class="flex gap-2">
+            <button data-action="confirm-analyze" data-id="${p.id}" class="btn-primary text-xs px-3 py-1.5 rounded flex-1">Lancer l'analyse</button>
+            <button data-action="cancel-analyze" class="btn-ghost text-xs px-3 py-1.5 rounded">Annuler</button>
+          </div>`}
+        ` : `
+          <label class="btn-primary text-xs px-3 py-1.5 rounded inline-block cursor-pointer">
+            📷 Analyser (prendre une photo)
+            <input type="file" accept="image/*" capture="environment" class="hidden" data-action="analyze-photo-input" data-id="${p.id}">
+          </label>
+        `}
+
+        ${analyzeResult ? `
+          <div class="text-sm mt-3 p-3 rounded" style="background:rgba(61,214,208,0.08)">${analyzeResult}</div>
+          <button data-action="use-as-profile-photo" data-id="${p.id}" class="text-xs text-[var(--cyan)] hover:underline mt-2">Utiliser cette photo comme photo de la fiche</button>
+        ` : ''}
+      </div>
+    </div>
+  </div>
+  `;
+}
+
 
 function renderItemCard(p){
   const isPlant = p.category === 'Plante';
@@ -917,7 +976,10 @@ function renderItemCard(p){
             <div class="font-semibold">${p.name}</div>
             <div class="text-[11px] text-[var(--text-low)] font-mono">${p.subCategory||''} · ${zoneName(p.zoneId)}</div>
           </div>
-          <button data-action="delete-plant" data-id="${p.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
+          <div class="flex gap-2">
+            <button data-action="open-item-detail" data-id="${p.id}" class="text-[var(--text-low)] hover:text-[var(--cyan)] text-xs">⤢</button>
+            <button data-action="delete-plant" data-id="${p.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
+          </div>
         </div>
 
                 ${photoSrc(p.photo) ? `
@@ -1019,6 +1081,13 @@ function renderItemCard(p){
    ========================================================================= */
 
 let currentFolderId = null; // null = racine (tous les root zones)
+let openItemDetailId = null;
+let zoneAnalyzeBusy = null;
+let zoneAnalyzeResult = null;
+let zoneAnalyzeResultId = null;
+let analyzePhotoPending = null; // photo prise en attente d'analyse
+let analyzeBusy = false;
+let analyzeResult = null;
 
 function zoneChildren(zoneId){ return state.zones.filter(z=>z.parentZoneId===zoneId); }
 function zoneBreadcrumb(zone){
@@ -1148,6 +1217,10 @@ function renderMaison(){
         <div class="flex items-center justify-between">
           <h2 class="font-hud text-xl font-700">${folder.name}</h2>
           <div class="flex gap-2">
+            <label class="btn-primary text-xs px-2 py-1 rounded cursor-pointer">
+              📷 Analyser
+              <input type="file" accept="image/*" capture="environment" class="hidden" data-action="analyze-zone-photo-input" data-id="${folder.id}">
+            </label>
             <button data-action="edit-zone-meta" data-id="${folder.id}" class="btn-ghost text-xs px-2 py-1 rounded">Modifier</button>
             <button data-action="delete-zone" data-id="${folder.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">Supprimer</button>
           </div>
@@ -1171,11 +1244,13 @@ function renderMaison(){
             <span class="text-[10px] font-mono w-8 text-right">${tidiness}</span>
           </div>
         </div>
-        <div class="flex flex-wrap gap-2 mt-3">
+         <div class="flex flex-wrap gap-2 mt-3">
           ${folder.exposition ? `<span class="text-[10px] font-mono px-2 py-1 rounded-full border border-[var(--panel-border)] text-[var(--cyan)]">Exposition: ${folder.exposition}</span>` : ''}
           ${folder.enjeux ? `<span class="text-[10px] font-mono px-2 py-1 rounded-full border border-[var(--panel-border)] text-[var(--amber)]">Enjeu: ${folder.enjeux}</span>` : ''}
           ${!folder.exposition && !folder.enjeux ? `<button data-action="edit-zone-meta" data-id="${folder.id}" class="text-[10px] text-[var(--cyan)] hover:underline">+ Ajouter exposition/enjeux</button>` : ''}
         </div>
+        ${zoneAnalyzeBusy===folder.id ? `<div class="text-xs text-[var(--text-low)] font-mono mt-2">JARVIS analyse la pièce...</div>` : ''}
+        ${zoneAnalyzeResult && zoneAnalyzeResultId===folder.id ? `<div class="text-sm mt-2 p-3 rounded" style="background:rgba(61,214,208,0.08)">${zoneAnalyzeResult}</div>` : ''}
       </div>
     </div>
   </div>` : `<div class="text-[10px] text-[var(--text-low)] font-mono mb-4">Cliquez sur une piece/zone pour l'ouvrir, comme un dossier.</div>`}
@@ -2546,6 +2621,74 @@ function attachHandlers(){
       mutate(s=> s.itemCategories.push(name));
     }
   }));
+  click('[data-action="open-item-detail"]', (e)=>{ openItemDetailId = e.currentTarget.dataset.id; analyzePhotoPending = null; analyzeResult = null; render(); });
+click('[data-action="close-item-detail"]', ()=>{ openItemDetailId = null; analyzePhotoPending = null; analyzeResult = null; render(); });
+click('[data-action="close-item-detail-backdrop"]', ()=>{ openItemDetailId = null; analyzePhotoPending = null; analyzeResult = null; render(); });
+document.querySelectorAll('[data-action="analyze-photo-input"]').forEach(el=>{
+  el.addEventListener('change', async (e)=>{
+    const file = e.target.files[0]; if(!file) return;
+    analyzePhotoPending = await resizeImage(file, 800);
+    analyzeResult = null;
+    render();
+  });
+});
+click('[data-action="cancel-analyze"]', ()=>{ analyzePhotoPending = null; render(); });
+click('[data-action="confirm-analyze"]', async (e)=>{
+  const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
+  if (!p || !analyzePhotoPending) return;
+  analyzeBusy = true; render();
+
+  const mediaType = analyzePhotoPending.substring(5, analyzePhotoPending.indexOf(';'));
+  const data = analyzePhotoPending.split(',')[1];
+  const prompt = p.category==='Plante'
+    ? `Analyse cette photo de la plante "${p.name}", en zone "${zoneName(p.zoneId)}". État enregistré: santé ${p.health}/100, exposition ${p.exposition}, tolérance chaleur ${p.toleranceChaleur}.
+Réponds en JSON strict, sans texte autour, sans markdown: {"diagnostic":"3-4 phrases en français: état général, ce qui va bien, ce qui inquiète, action recommandée", "health": nombre de 0 à 100 reflétant l'état visuel actuel, "tailleRecommandee": true ou false, "vientDetreArrosee": true si la terre semble humide/récemment arrosée sinon false}`
+    : `Analyse cette photo de l'objet "${p.name}" (${p.subCategory||p.category}), en zone "${zoneName(p.zoneId)}". État enregistré: ${p.etat}.
+Réponds en JSON strict, sans texte autour, sans markdown: {"diagnostic":"3-4 phrases en français: état général, usure visible, action recommandée", "etat": "Bon état" ou "À surveiller" ou "Dégradé" ou "À remplacer"}`;
+
+  try{
+    const res = await fetch('/api/jarvis-chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        messages:[{ role:'user', content:[
+          { type:'image', source:{ type:'base64', media_type:mediaType, data } },
+          { type:'text', text: prompt }
+        ]}]
+      })
+    });
+    const responseData = await res.json();
+    const rawText = (responseData.content||[]).map(b=>b.text||'').join('').trim();
+    const cleaned = rawText.replace(/```json|```/g,'').trim();
+    let parsed;
+    try{ parsed = JSON.parse(cleaned); }catch(e){ parsed = { diagnostic: rawText }; }
+
+    analyzeResult = parsed.diagnostic || "Je n'ai pas pu analyser cette photo, réessaie.";
+
+    mutate(s=>{
+      const pp = s.plants.find(pp=>pp.id===p.id);
+      if (!pp) return;
+      if (p.category==='Plante'){
+        if (typeof parsed.health === 'number') pp.health = Math.max(0, Math.min(100, parsed.health));
+        if (typeof parsed.tailleRecommandee === 'boolean') pp.tailleRecommandee = parsed.tailleRecommandee;
+        if (parsed.vientDetreArrosee === true) pp.dernierArrosage = todayISO();
+      } else if (parsed.etat) {
+        pp.etat = parsed.etat;
+      }
+    });
+  }catch(err){
+    analyzeResult = "Erreur de connexion. Réessaie.";
+  }
+  analyzeBusy = false;
+  render();
+});
+click('[data-action="use-as-profile-photo"]', async (e)=>{
+  const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
+  if (!p || !analyzePhotoPending) return;
+  const key = await storePhoto(analyzePhotoPending);
+  mutate(s=>{ const pp = s.plants.find(pp=>pp.id===p.id); if (pp) pp.photo = key; });
+  analyzePhotoPending = null; analyzeResult = null;
+  render();
+});
   click('[data-action="add-item"]', (e)=> openItemModal(e.currentTarget.dataset.zone || currentFolderId));
   click('[data-action="edit-plant-traits"]', (e)=>{
   const p = state.plants.find(p=>p.id===e.currentTarget.dataset.id);
@@ -2553,13 +2696,14 @@ function attachHandlers(){
   openPrompt({
     title:`Modifier "${p.name}"`,
     fields:[
+      {label:'Nom', value:p.name},
       {label:'Zone', type:'select', options: buildZoneTreeOptions()},
       {label:'Exposition', type:'select', options:[{value:'Plein soleil',label:'Plein soleil'},{value:'Mi-ombre',label:'Mi-ombre'},{value:'Ombre',label:'Ombre'}]},
-            {label:'Tolérance à la chaleur', type:'select', options:[{value:'faible',label:'Faible'},{value:'moyenne',label:'Moyenne'},{value:'haute',label:'Haute'}]},
+      {label:'Tolérance à la chaleur', type:'select', options:[{value:'faible',label:'Faible'},{value:'moyenne',label:'Moyenne'},{value:'haute',label:'Haute'}]},
     ],
-    onSubmit:([zoneId,exposition,toleranceChaleur])=> mutate(s=>{
+    onSubmit:([name,zoneId,exposition,toleranceChaleur])=> mutate(s=>{
         const pp = s.plants.find(pp=>pp.id===p.id);
-        if (pp){ pp.zoneId = zoneId; pp.exposition = exposition; pp.toleranceChaleur = toleranceChaleur; }
+        if (pp){ if(name) pp.name = name; pp.zoneId = zoneId; pp.exposition = exposition; pp.toleranceChaleur = toleranceChaleur; }
       })
   });
 });
@@ -2569,14 +2713,15 @@ function attachHandlers(){
   openPrompt({
     title:`Modifier "${p.name}"`,
     fields:[
+      {label:'Nom', value:p.name},
       {label:'Zone', type:'select', options: buildZoneTreeOptions()},
       {label:'État', value:p.etat||''},
       {label:'Quantité', type:'number', value:String(p.quantite||1)},
       {label:'Notes', value:p.notes||''},
     ],
-    onSubmit:([zoneId,etat,quantite,notes])=> mutate(s=>{
+    onSubmit:([name,zoneId,etat,quantite,notes])=> mutate(s=>{
         const pp = s.plants.find(pp=>pp.id===p.id);
-        if (pp){ pp.zoneId = zoneId; pp.etat = etat; pp.quantite = parseInt(quantite)||1; pp.notes = notes; }
+        if (pp){ if(name) pp.name = name; pp.zoneId = zoneId; pp.etat = etat; pp.quantite = parseInt(quantite)||1; pp.notes = notes; }
       })
   });
 });
@@ -2688,6 +2833,51 @@ function attachHandlers(){
   const oldPhoto = z.photo;
   await deletePhoto(oldPhoto);
   mutate(s=>{ const zz = s.zones.find(zz=>zz.id===id); if (zz) zz.photo = null; });
+});
+document.querySelectorAll('[data-action="analyze-zone-photo-input"]').forEach(el=>{
+  el.addEventListener('change', async (e)=>{
+    const file = e.target.files[0]; if(!file) return;
+    const zoneId = e.target.dataset.id;
+    const z = state.zones.find(z=>z.id===zoneId);
+    if (!z) return;
+
+    const photo = await resizeImage(file, 800);
+    zoneAnalyzeBusy = zoneId; zoneAnalyzeResult = null; render();
+
+    const mediaType = photo.substring(5, photo.indexOf(';'));
+    const data = photo.split(',')[1];
+    const prompt = `Analyse cette photo de la pièce/zone "${z.name}". État de rangement actuellement enregistré: ${z.tidiness}/100.
+Réponds en JSON strict, sans texte autour, sans markdown: {"diagnostic":"2-3 phrases en français sur l'état de rangement/propreté visible", "tidiness": nombre de 0 à 100 reflétant le rangement visuel (100=impeccable, 0=complètement en bazar)}`;
+
+    try{
+      const res = await fetch('/api/jarvis-chat', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          messages:[{ role:'user', content:[
+            { type:'image', source:{ type:'base64', media_type:mediaType, data } },
+            { type:'text', text: prompt }
+          ]}]
+        })
+      });
+      const responseData = await res.json();
+      const rawText = (responseData.content||[]).map(b=>b.text||'').join('').trim();
+      const cleaned = rawText.replace(/```json|```/g,'').trim();
+      let parsed;
+      try{ parsed = JSON.parse(cleaned); }catch(err){ parsed = { diagnostic: rawText }; }
+
+      zoneAnalyzeResult = parsed.diagnostic || "Analyse impossible, réessaie.";
+      zoneAnalyzeResultId = zoneId;
+
+      if (typeof parsed.tidiness === 'number'){
+        mutate(s=>{ const zz = s.zones.find(zz=>zz.id===zoneId); if (zz) zz.tidiness = Math.max(0, Math.min(100, parsed.tidiness)); });
+      }
+    }catch(err){
+      zoneAnalyzeResult = "Erreur de connexion. Réessaie.";
+      zoneAnalyzeResultId = zoneId;
+    }
+    zoneAnalyzeBusy = null;
+    render();
+  });
 });
   click('[data-action="edit-zone-meta"]', (e)=>{
     const z = state.zones.find(z=>z.id===e.currentTarget.dataset.id);

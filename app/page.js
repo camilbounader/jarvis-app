@@ -369,7 +369,9 @@ function startPolling(){
     try{
       const res = await fetch('/api/state');
       const data = await res.json();
+      console.log('🔄 Poll reçu:', new Date().toLocaleTimeString());
       if (data.value && !document.querySelector('.modal-backdrop')){
+        console.log('⚠️ Poll a écrasé les données locales');
         state = hydrateState(JSON.parse(data.value));
         render();
       }
@@ -384,6 +386,7 @@ function saveState(){
 
 function flushSave(){
   clearTimeout(saveTimer);
+  console.log('💾 Sauvegarde envoyée:', new Date().toLocaleTimeString());
   try{
     fetch('/api/state', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -395,7 +398,6 @@ function flushSave(){
 
 if (typeof window !== 'undefined'){
   window.addEventListener('beforeunload', flushSave);
-  document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState==='hidden') flushSave(); });
 }
 
 // Vérifie les barres d'état personnalisées de tous les éléments : si l'une

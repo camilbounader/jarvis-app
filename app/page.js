@@ -2920,21 +2920,26 @@ click('[data-action="toggle-setting"]', (e)=> mutate(s=>{
       alert("Erreur lors de l'export.");
     }
   });
-  click('[data-action="import-data"]', ()=> openPrompt({
-    title:'Importer une sauvegarde',
-    fields:[{label:'Collez ici les données exportées', value:''}],
-    onSubmit:([json])=>{
+  click('[data-action="import-data"]', ()=>{
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.onchange = async (e)=>{
+      const file = e.target.files[0];
+      if (!file) return;
+      const text = await file.text();
       try{
-        const imported = hydrateState(JSON.parse(json));
+        const imported = hydrateState(JSON.parse(text));
         state = imported;
-        saveState();
+        flushSave();
         render();
         alert("Import réussi !");
-      }catch(e){
-        alert("Le texte collé n'est pas valide. Vérifie que tu as bien tout copié.");
+      }catch(err){
+        alert("Le fichier n'est pas valide.");
       }
-    }
-  }));
+    };
+    input.click();
+  });
 click('[data-action="add-event"]', ()=> openPrompt({
     title:'Nouvel événement',
     fields:[

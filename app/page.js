@@ -306,6 +306,22 @@ function hydrateState(loaded){
   if (Array.isArray(merged.plants)){
     merged.plants.forEach(p=>{ if (!p.customFields) p.customFields = []; if (!p.statusBars) p.statusBars = []; });
   }
+  // Crée une tâche récurrente de ménage par défaut pour chaque pièce intérieure qui n'en a pas encore
+  if (Array.isArray(merged.zones) && Array.isArray(merged.recurringTasks)){
+    const defaultIntervalFor = (name)=>{
+      const n = name.toLowerCase();
+      if (n.includes('salon') || n.includes('cuisine')) return 5;
+      if (n.includes('salle de bain') || n.includes('sdb') || n.includes('toilette')) return 7;
+      if (n.includes('chambre')) return 10;
+      return 7;
+    };
+    merged.zones.filter(z=>z.type==='pièce').forEach(z=>{
+      const hasRecurring = merged.recurringTasks.some(r=> r.zoneId===z.id && r.category==='Ménage');
+      if (!hasRecurring){
+        merged.recurringTasks.push({ id:uid(), title:`Ménage — ${z.name}`, category:'Ménage', weight:2, intervalDays: defaultIntervalFor(z.name), zoneId:z.id, lastDone: todayISO(), adaptiveTag:null });
+      }
+    });
+  }
   // anciennes tâches enregistrées avec "done" : on les migre vers l'historique et on les retire de la liste active
   if (Array.isArray(merged.tasks)){
     const stillActive = [];
@@ -589,13 +605,15 @@ async function fetchWeatherHistory(){
     const heatDays = d.daily.temperature_2m_max.filter(t=>t>=30).length;
     const droughtDays = d.daily.precipitation_sum.filter(p=>p<1).length;
     const totalDays = d.daily.time.length;
+    const rainYesterday = d.daily.precipitation_sum[d.daily.precipitation_sum.length-1] || 0;
+    const rainLast3Days = d.daily.precipitation_sum.slice(-3).reduce((a,b)=>a+b,0);
     let summary = null;
     if (droughtDays >= 12){
       summary = `${droughtDays} jours sur les ${totalDays} derniers sans pluie significative` + (heatDays>0 ? `, dont ${heatDays} jour(s) de canicule (≥30°C)` : '') + '. Stress hydrique cumulé probable sur les plantes.';
     } else if (heatDays >= 6){
       summary = `${heatDays} jour(s) de forte chaleur (≥30°C) sur les ${totalDays} derniers jours.`;
     }
-    weatherHistory = { droughtDays, heatDays, totalDays, summary };
+    weatherHistory = { droughtDays, heatDays, totalDays, summary, rainYesterday, rainLast3Days };
   }catch(e){
     weatherHistory = null;
   }
@@ -622,7 +640,8 @@ const MODULES = [
 // par personne (Google/email) et ce sélecteur disparaîtra.
 let currentUserId = PEOPLE[0].id;
 
-let currentModule = 'dashboard';
+let currentModule = (typeof localStorage !== 'undefined' && localStorage.getItem('jarvis:lastModule')) || 'dashboard';
+let currentFolderId = (typeof localStorage !== 'undefined' && localStorage.getItem('jarvis:lastFolder')) || null;
 let calendarFilter = 'Tous';
 let calendarViewMode = 'semaine'; // 'semaine' | 'mois' | 'liste'
 let calendarWeekOffset = 0;
@@ -842,7 +861,22 @@ function careBarFromDate(dateStr, intervalDays){
   const daysSince = daysBetween(dateStr, todayISO());
   return Math.max(0, Math.min(100, Math.round(100 - (daysSince/intervalDays)*100)));
 }
-function plantWateringInterval(p){ return p.toleranceChaleur==='haute' ? 6 : p.toleranceChaleur==='moyenne' ? 4 : 2; }
+function plantWateringInterval(p){
+  let base = p.toleranceChaleur==='haute' ? 6 : p.toleranceChaleur==='moyenne' ? 4 : 2;
+  // Sécheresse cumulée (calculée par fetchWeatherHistory) : resserre l'intervalle
+  if (weatherHistory && weatherHistory.droughtDays >= 12) base = Math.max(1, Math.round(base/2));
+  else if (weatherHistory && weatherHistory.droughtDays >= 6) base = Math.max(1, Math.round(base*0.75));
+  // Pluie récente (dans les prévisions passées J-1/J0 via weatherData) : desserre l'intervalle
+  if (recentRainDetected()) base = Math.round(base*1.5);
+  return base;
+}
+function recentRainDetected(){
+  // Vraie donnée : pluie significative hier ou cumul sur 3 jours (en mm)
+  if (weatherHistory && weatherHistory.rainYesterday >= 3) return true;
+  if (weatherHistory && weatherHistory.rainLast3Days >= 8) return true;
+  return false;
+}
+}
 function plantWateringBar(p){ return careBarFromDate(p.dernierArrosage, plantWateringInterval(p)); }
 function plantPruningBar(p){
   const tailleAction = (p.actions||[]).filter(a=>a.type && a.type.toLowerCase().includes('taill')).sort((a,b)=> new Date(b.date)-new Date(a.date))[0];
@@ -916,7 +950,10 @@ function renderItemDetail(p){
     <div class="panel rounded-lg p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
       <div class="flex items-center justify-between mb-3">
         <h2 class="font-hud text-xl font-700">${p.name}</h2>
-        <button data-action="close-item-detail" class="text-[var(--text-low)] hover:text-[var(--red)] text-lg">✕</button>
+        <div class="flex gap-2 items-center">
+          <button data-action="${isPlant?'edit-plant-traits':'edit-item-traits'}" data-id="${p.id}" class="btn-ghost text-xs px-2 py-1 rounded">Modifier</button>
+          <button data-action="close-item-detail" class="text-[var(--text-low)] hover:text-[var(--red)] text-lg">✕</button>
+        </div>
       </div>
 
       ${photoSrc(p.photo) ? `<img src="${photoSrc(p.photo)}" class="w-full h-48 object-cover rounded-md mb-3 border border-[var(--panel-border)]"/>`
@@ -1080,7 +1117,6 @@ function renderItemCard(p){
    MAISON — zones par étage, avec le plan à intégrer plus tard
    ========================================================================= */
 
-let currentFolderId = null; // null = racine (tous les root zones)
 let openItemDetailId = null;
 let zoneAnalyzeBusy = null;
 let zoneAnalyzeResult = null;
@@ -1364,6 +1400,7 @@ function renderTasks(){
             <div class="text-sm">${rt.title}</div>
             <div class="text-[10px] text-[var(--text-low)] font-mono">${rt.category} · tous les ${rt.intervalDays}j${rt.adaptiveTag?` · adaptatif (${rt.adaptiveTag})`:''} · dernier: il y a ${status.daysSince}j</div>
           </div>
+          <button data-action="edit-recurring-interval" data-id="${rt.id}" class="text-[var(--cyan)] hover:underline text-xs">Modifier</button>
           <button data-action="delete-recurring" data-id="${rt.id}" class="text-[var(--text-low)] hover:text-[var(--red)] text-xs">✕</button>
         </div>`;
       }).join('') || '<div class="text-sm text-[var(--text-low)]">Aucune tâche récurrente.</div>'}
@@ -1847,7 +1884,7 @@ function renderDocuments(){
 let jarvisBusy = false;
 let pendingImages = [];
 let lastFailedMessage = null;
-let jarvisTab = 'chat'; // 'chat' | 'audit'
+let jarvisTab = (typeof localStorage !== 'undefined' && localStorage.getItem('jarvis:lastJarvisTab')) || 'chat'; // 'chat' | 'audit'
 let auditBusy = false;
 let pendingAuditPhoto = {}; // { [questionId]: dataUrl }
 
@@ -1944,6 +1981,7 @@ function renderChatTab(){
     </div>` : ''}
 
     <div class="flex gap-2">
+      <button data-action="open-time-plan" class="btn-ghost rounded-md px-3 flex items-center text-lg" title="Planifier mon temps libre">📅</button>
       <label class="btn-ghost rounded-md px-3 flex items-center cursor-pointer text-lg">
         📷<input type="file" accept="image/*" multiple class="hidden" data-action="jarvis-image">
       </label>
@@ -2171,7 +2209,7 @@ ${stressLine}
 ${JSON.stringify({
   house: state.house,
   plants: state.plants.map(p=>({id:p.id,name:p.name,category:p.category,health:p.health,zoneId:p.zoneId,exposition:p.exposition,toleranceChaleur:p.toleranceChaleur,statusBars:(p.statusBars||[]).map(b=>({label:b.label,value:b.value}))})),
-  tachesActives: state.tasks.map(t=>({id:t.id,title:t.title,category:t.category,assignee:t.assignee})),
+  tachesActives: state.tasks.map(t=>({id:t.id,title:t.title,category:t.category,assignee:t.assignee,poids:t.weight,dureeEstimee:t.weight===1?'15min':t.weight===2?'45min':'90min',echeance:t.dueDate})),
   tachesRecurrentes: state.recurringTasks.map(r=>({id:r.id,title:r.title,intervalDays:r.intervalDays,adaptiveTag:r.adaptiveTag})),
 })}
 
@@ -2419,6 +2457,56 @@ function fileToDataURL(file){
 // les champs changent selon la catégorie choisie (Plante vs Matériel vs catégorie custom).
 // Modale pour ajouter une barre d'état personnalisée (ex: "Usure" sur la pergola),
 // avec choix de ce qui se passe automatiquement si elle descend trop bas.
+function openTimePlanModal(){
+  openPrompt({
+    title:'Planifier mon temps libre',
+    fields:[
+      {label:'Temps disponible (minutes)', type:'number', value:'120'},
+      {label:'Avec qui ?', type:'select', options:[{value:'',label:'Seul(e)'}, ...PEOPLE.filter(p=>p.id!==currentUserId).map(p=>({value:p.id,label:p.name}))]},
+    ],
+    onSubmit:([minutes,withPersonId])=>{
+      buildTimePlan(parseInt(minutes)||120, withPersonId || null);
+    }
+  });
+}
+
+async function buildTimePlan(minutes, withPersonId){
+  jarvisTab = 'chat'; jarvisBusy = true; render(); scrollChatToBottom();
+
+  const withName = withPersonId ? personById(withPersonId).name : null;
+  const userText = `J'ai ${minutes} minutes de libre${withName ? ' avec '+withName : ''}, propose-moi un plan d'action.`;
+  state.chat.push({ role:'user', text:userText, images:[] });
+  render(); scrollChatToBottom();
+
+  const prompt = `${buildJarvisSystemPrompt()}
+
+DEMANDE SPÉCIALE — PLANIFICATION DE TEMPS LIBRE :
+La personne dispose de ${minutes} minutes${withName ? ', accompagnée de '+withName : ', seule'}. En te basant sur "tachesActives" (avec leur durée estimée et leur échéance) et "tachesRecurrentes" ci-dessus, sélectionne un sous-ensemble de tâches qui rentrent dans ce temps disponible, en priorisant :
+1. Les tâches déjà en retard.
+2. Les tâches récurrentes en retard.
+3. Les tâches les plus urgentes (échéance proche).
+Présente un plan d'action concret dans "reply" : liste ordonnée des tâches choisies avec leur durée estimée et le temps total, en expliquant brièvement pourquoi ce choix. Si rien ne tient dans le temps donné, dis-le honnêtement plutôt que de forcer. N'utilise PAS d'actions pour l'instant, laisse "actions" vide — la personne validera le plan avant qu'on l'applique.`;
+
+  try{
+    const res = await fetch('/api/jarvis-chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ system: prompt, messages:[{ role:'user', content: userText }] })
+    });
+    const data = await res.json();
+    const rawText = (data.content||[]).map(b=>b.text||'').join('');
+    const cleaned = rawText.replace(/```json|```/g,'').trim();
+    let parsed;
+    try{ parsed = JSON.parse(cleaned); }catch(e){ parsed = { reply: rawText || "Je n'ai pas pu construire de plan.", actions: [] }; }
+    state.chat.push({ role:'assistant', text: parsed.reply || '...' });
+  }catch(err){
+    state.chat.push({ role:'assistant', text:"Erreur de connexion. Réessaie.", isError:true });
+  }
+
+  jarvisBusy = false;
+  saveState();
+  render();
+  scrollChatToBottom();
+}
 function openStatusBarModal(itemId){
   const modal = document.createElement('div');
   modal.className = 'fixed inset-0 modal-backdrop flex items-center justify-center z-50 p-4';
@@ -2594,7 +2682,11 @@ function resizeImage(file, maxDim=600){
 
 function attachHandlers(){
   document.querySelectorAll('[data-nav]').forEach(el=>{
-    el.addEventListener('click', ()=>{ currentModule = el.dataset.nav; render(); });
+    el.addEventListener('click', ()=>{
+  currentModule = el.dataset.nav;
+  try{ localStorage.setItem('jarvis:lastModule', currentModule); }catch(e){}
+  render();
+});
   });
 
   const click = (sel, fn) => document.querySelectorAll(sel).forEach(el=> el.addEventListener('click', fn));
@@ -2805,7 +2897,11 @@ click('[data-action="use-as-profile-photo"]', async (e)=>{
   });
 
   // Maison — navigation dossier + zones
-  click('[data-action="open-folder"]', (e)=>{ currentFolderId = e.currentTarget.dataset.id || null; render(); });
+  click('[data-action="open-folder"]', (e)=>{
+  currentFolderId = e.currentTarget.dataset.id || null;
+  try{ localStorage.setItem('jarvis:lastFolder', currentFolderId || ''); }catch(err){}
+  render();
+});
   click('[data-action="add-zone"]', ()=> openPrompt({
     title:'Nouvelle zone',
     fields:[
@@ -2822,7 +2918,11 @@ click('[data-action="use-as-profile-photo"]', async (e)=>{
       mutate(s=>{
         const parent = effectiveParent ? s.zones.find(z=>z.id===effectiveParent) : null;
         const z = { id:uid(), name, parentZoneId: effectiveParent||null, floor: parent?parent.floor:floor, type, exposition, enjeux, photo:null, tidiness:80 };
-        s.zones.push(z); currentFolderId = z.id;
+        s.zones.push(z);
+        if (type==='pièce'){
+          s.recurringTasks.push({ id:uid(), title:`Ménage — ${name}`, category:'Ménage', weight:2, intervalDays:7, zoneId:z.id, lastDone: todayISO(), adaptiveTag:null });
+        }
+        currentFolderId = z.id;
       });
     }
   }));
@@ -3020,6 +3120,14 @@ Réponds en JSON strict, sans texte autour, sans markdown: {"diagnostic":"2-3 ph
       mutate(s=> s.recurringTasks.push({ id:uid(), title, category, weight:1, intervalDays: parseInt(intervalDays)||7, zoneId: zoneId||null, lastDone: todayISO(), adaptiveTag: adaptiveTag||null }));
     }
   }));
+  click('[data-action="edit-recurring-interval"]', (e)=> openPrompt({
+  title:'Modifier la récurrence',
+  fields:[{label:'Intervalle (jours)', type:'number', value:String(state.recurringTasks.find(r=>r.id===e.currentTarget.dataset.id)?.intervalDays||7)}],
+  onSubmit:([intervalDays])=> mutate(s=>{
+    const rt = s.recurringTasks.find(r=>r.id===e.currentTarget.dataset.id);
+    if (rt) rt.intervalDays = parseInt(intervalDays)||7;
+  })
+}));
   click('[data-action="delete-recurring"]', (e)=> mutate(s=> s.recurringTasks = s.recurringTasks.filter(r=>r.id!==e.currentTarget.dataset.id)));
   click('[data-action="detect-recurring"]', ()=>{ if(!recurringDetectBusy) detectRecurringTasks(); });
   click('[data-action="accept-recurring-suggestion"]', (e)=>{
@@ -3206,10 +3314,15 @@ click('[data-action="add-event"]', ()=> openPrompt({
     mutate(s=> s.jarvisPhotos.push(key));
   });
 
-  // Jarvis tabs
-  click('[data-action="jarvis-tab"]', (e)=>{ jarvisTab = e.currentTarget.dataset.tab; render(); });
-
+    // Jarvis tabs
+  click('[data-action="jarvis-tab"]', (e)=>{
+  jarvisTab = e.currentTarget.dataset.tab;
+  try{ localStorage.setItem('jarvis:lastJarvisTab', jarvisTab); }catch(err){}
+  render();
+});
+  click('[data-action="open-time-plan"]', ()=> openTimePlanModal());
   // Jarvis chat
+
   const imgInput = document.querySelector('[data-action="jarvis-image"]');
   if (imgInput) imgInput.addEventListener('change', async (e)=>{
     const files = Array.from(e.target.files || []);

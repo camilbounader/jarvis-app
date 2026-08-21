@@ -217,10 +217,7 @@ function seedState(){
       { id: uid(), title:'Tonte jardin avant', category:'Jardin', weight:2, assignee:'luc', dueDate: iso(2), done:false, log:[] },
     ],
     // Historique des tâches terminées (sert au calcul d'équité — les tâches actives sont supprimées une fois cochées)
-    completedLog: [
-      { person:'camil', date: iso(-1), detail:'Salle de bain (sol + miroir)', category:'Ménage', weight:2 },
-      { person:'clement', date: iso(0), detail:'Vaisselle du soir', category:'Cuisine', weight:1 },
-    ],
+    completedLog: [],
     // Rotation : dernière personne assignée par catégorie, pour ne pas proposer deux fois de suite la même
     rotation: {},
     polls: [
@@ -876,7 +873,6 @@ function recentRainDetected(){
   if (weatherHistory && weatherHistory.rainLast3Days >= 8) return true;
   return false;
 }
-}
 function plantWateringBar(p){ return careBarFromDate(p.dernierArrosage, plantWateringInterval(p)); }
 function plantPruningBar(p){
   const tailleAction = (p.actions||[]).filter(a=>a.type && a.type.toLowerCase().includes('taill')).sort((a,b)=> new Date(b.date)-new Date(a.date))[0];
@@ -1352,22 +1348,7 @@ function renderTasks(){
     <button data-action="add-task" class="btn-primary text-sm px-4 py-2 rounded-md">+ Nouvelle tâche</button>
   </div>
 
-  <!-- Equite -->
-  <div class="panel rounded-lg p-5 mb-3">
-    <div class="badge text-[var(--text-low)] mb-3">RÉPARTITION DE LA CHARGE — pondérée par durée/difficulté</div>
-    <div class="space-y-3">
-      ${PEOPLE.map(p=>`
-        <div class="flex items-center gap-3">
-          <div class="w-16 text-sm font-medium" style="color:${p.color}">${p.name}</div>
-          <div class="flex-1 health-bar" style="height:10px">
-            <div class="health-fill" style="width:${(weightSum[p.id]/maxWeight)*100}%; background:${p.color}"></div>
-          </div>
-          <div class="w-20 text-right font-mono text-xs text-[var(--text-mid)]">${weightSum[p.id]} pts · ${countSum[p.id]}t</div>
-        </div>
-      `).join('')}
-    </div>
-    <div class="text-[10px] text-[var(--text-low)] font-mono mt-3">1 point = tâche "rapide", 2 = "moyenne", 3 = "longue". Les tâches cochées sortent de la liste active et alimentent ce calcul.</div>
-  </div>
+
 
   <!-- Tâches récurrentes -->
   <div class="mb-6">
@@ -1435,9 +1416,12 @@ function renderTasks(){
             <span class="font-medium" style="color:${personById(l.person).color}">${personById(l.person).name}</span>
             <span class="flex-1 text-[var(--text-hi)]">${l.detail}</span>
             <span class="text-[var(--text-low)] font-mono">${l.category} · ${fmtDateShort(l.date)}</span>
+            <button data-action="delete-history-entry" data-index="${state.completedLog.indexOf(l)}" class="text-[var(--text-low)] hover:text-[var(--red)]">✕</button>
           </div>
         `).join('') || '<div class="text-sm text-[var(--text-low)]">Rien pour ce filtre.</div>'}
       </div>
+    </div>` : ''}
+  </div>
     </div>` : ''}
   </div>
 
@@ -3089,6 +3073,10 @@ Réponds en JSON strict, sans texte autour, sans markdown: {"diagnostic":"2-3 ph
       if(t){ const d = new Date(t.dueDate); d.setDate(d.getDate()+parseInt(days)); t.dueDate = d.toISOString().slice(0,10); }
     })
   }));
+  click('[data-action="delete-history-entry"]', (e)=> mutate(s=>{
+  const idx = parseInt(e.currentTarget.dataset.index);
+  s.completedLog.splice(idx, 1);
+}));
   click('[data-action="toggle-history"]', ()=>{ historyOpen = !historyOpen; render(); });
   click('[data-action="history-filter-person"]', (e)=>{ historyFilterPerson = e.currentTarget.dataset.value; render(); });
   click('[data-action="history-filter-cat"]', (e)=>{ historyFilterCat = e.currentTarget.dataset.value; render(); });

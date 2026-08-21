@@ -495,7 +495,7 @@ function computeAlerts(){
   state.plants.filter(p=>p.category==='Plante' && p.health<40).forEach(p=>{
     alerts.push({ level:'red', title:`${p.name} en détresse`, detail:`Etat: ${p.health}/100`, action:'Voir le module Jardin & Matériel' });
   });
-  state.observations.filter(o=>o.severity==='urgent').forEach(o=>{
+  state.observations.filter(o=>o.severity==='urgent' || o.severity==='attention').forEach(o=>{
     alerts.push({ level:'red', title:`Observation JARVIS — ${zoneName(o.zoneId)}`, detail:o.text, action:'Voir le module Maison' });
   });
   return alerts;
@@ -2220,6 +2220,7 @@ Quand on t'envoie une photo, analyse-la en détail comme le ferait quelqu'un qui
 - Sois honnête sur l'incertitude : tu identifies visuellement, tu ne mesures rien. Dis "probablement" plutôt que d'affirmer quand ce n'est pas clair.
 
 Quand la personne te fait un retour terrain qui contredit ou affine ce que tu sais (ex: "la lavande tient mieux la sécheresse que ce que tu penses", "cette plante ne va pas bien à cet endroit", "on arrose trop/pas assez"), mets à jour les données correspondantes ET explique brièvement pourquoi dans "reply". Si le problème semble structurel (mauvais emplacement, exposition inadaptée, objet à remplacer comme une pergola abîmée), propose un projet via "suggest_project" plutôt que juste une tâche ponctuelle.
+Contexte temporel et géographique : nous sommes le ${new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}, à Mérignac (Gironde, climat océanique tempéré du Sud-Ouest, zone de rusticité proche de 8b/9a). Raisonne TOUJOURS en fonction de la vraie saison actuelle : ne recommande jamais une action hors-saison (ex: pas de transplantation en plein été, pas de taille sévère en pleine sève, respecte les périodes de gel pour les semis et plantations sensibles, anticipe la croissance des haies/arbres pour proposer une taille avant qu'ils ne deviennent ingérables, pense à protéger les espèces sensibles au gel en amont de l'hiver). Sois honnête sur l'incertitude si tu n'es pas sûr d'une recommandation précise pour une espèce ou un contexte spécifique (bassin à poissons, etc.).
 
 Quand la personne te décrit plusieurs plantes ou objets à la suite (ex: elle énumère tout ce qu'il y a sur sa terrasse), crée-les TOUS d'un coup via plusieurs actions "create_item" dans la même réponse — pas besoin de confirmer un par un. Déduis pour chacun : la catégorie (Plante/Matériel), la sous-catégorie, la zone (si elle dit "tout ça c'est sur la terrasse", applique cette zone à tous), l'exposition (hérite de la zone si elle n'est pas précisée autrement), et la tolérance à la chaleur si tu peux l'estimer depuis l'espèce. Si la zone est réellement ambiguë pour un élément précis, demande une seule clarification groupée à la fin plutôt que de bloquer toute la création.
 
@@ -3453,7 +3454,34 @@ click('[data-action="add-event"]', ()=> openPrompt({
 loadState().then(()=>{
   fetchWeather();
   syncGoogleCalendar();
+  checkSeasonalReminder();
 });
+
+async function checkSeasonalReminder(){
+  const lastCheck = localStorage.getItem('jarvis:lastSeasonalCheck');
+  const daysSince = lastCheck ? daysBetween(lastCheck, todayISO()) : 999;
+  if (daysSince < 7) return; // une seule fois par semaine, pour ne pas gaspiller de requêtes
+
+  localStorage.setItem('jarvis:lastSeasonalCheck', todayISO());
+
+  const plants = state.plants.filter(p=>p.category==='Plante').map(p=>({name:p.name, zone:zoneName(p.zoneId)}));
+  const prompt = `Nous sommes le ${new Date().toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})} à Mérignac (Gironde, climat océanique). Voici l'inventaire de plantes/jardin de la maison: ${JSON.stringify(plants)}.
+Y a-t-il une action saisonnière importante à anticiper dans les 2-3 prochaines semaines (semis, taille de haie/arbre avant qu'elle ne devienne difficile à gérer, protection contre un gel à venir, période de plantation optimale, etc.) ? Ne réponds QUE si c'est vraiment pertinent et imminent, pas pour remplir. Réponds en JSON strict: {"pertinent": true|false, "titre":"...", "texte":"..."}`;
+
+  try{
+    const res = await fetch('/api/jarvis-chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ messages:[{ role:'user', content: prompt }] })
+    });
+    const data = await res.json();
+    const rawText = (data.content||[]).map(b=>b.text||'').join('');
+    const cleaned = rawText.replace(/```json|```/g,'').trim();
+    const parsed = JSON.parse(cleaned);
+    if (parsed.pertinent){
+      mutate(s=> s.observations.push({ id:uid(), zoneId:null, text:`${parsed.titre} — ${parsed.texte}`, severity:'attention', date:todayISO() }));
+    }
+  }catch(e){ /* silencieux, on retentera dans une semaine */ }
+}
 
 if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(()=>{});

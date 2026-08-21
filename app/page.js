@@ -1422,8 +1422,6 @@ function renderTasks(){
       </div>
     </div>` : ''}
   </div>
-    </div>` : ''}
-  </div>
 
   <!-- Sondages -->
   <div class="mb-6">
